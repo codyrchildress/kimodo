@@ -115,7 +115,7 @@ def _format_wait(seconds: float) -> str:
 def _queue_modal_markdown(position: int, total: int, estimated_wait_sec: float) -> str:
     wait_str = _format_wait(estimated_wait_sec)
     mins = int(MAX_SESSION_MINUTES) if MAX_SESSION_MINUTES == int(MAX_SESSION_MINUTES) else MAX_SESSION_MINUTES
-    return f"""## Kimodo Demo — Please Wait
+    return f"""## AnimBuddy Demo — Please Wait
 
 This demo runs with limited capacity.
 Each user gets **{mins} minute{"s" if mins != 1 else ""}** of interactive time.
@@ -133,7 +133,7 @@ Please keep this tab open — the demo will start automatically when it's your t
 
 def _welcome_modal_markdown() -> str:
     mins = int(MAX_SESSION_MINUTES) if MAX_SESSION_MINUTES == int(MAX_SESSION_MINUTES) else MAX_SESSION_MINUTES
-    return f"""## Welcome to Kimodo Demo
+    return f"""## Welcome to AnimBuddy Demo
 
 You have been granted a **{mins}-minute** demo session.
 Your session timer has started.
@@ -147,7 +147,7 @@ def _expiry_modal_markdown() -> str:
     return f"""## Session Expired
 
 Your {mins}-minute demo session has ended.
-Thank you for trying Kimodo!
+Thank you for trying AnimBuddy!
 
 Refresh this page to rejoin the queue, or [duplicate this Space]({DUPLICATE_SPACE_URL}) for unlimited access.
 """
@@ -226,7 +226,7 @@ class QueueManager:
         md_content = _queue_modal_markdown(pos, total, wait_sec)
 
         modal = client.gui.add_modal(
-            "Kimodo Demo — Please Wait",
+            "AnimBuddy Demo — Please Wait",
             size="xl",
             show_close_button=False,
         )
@@ -254,7 +254,7 @@ class QueueManager:
             self._show_quick_start_modal(client)
 
         modal = client.gui.add_modal(
-            "Welcome to Kimodo Demo",
+            "Welcome to AnimBuddy Demo",
             size="xl",
             show_close_button=True,
         )

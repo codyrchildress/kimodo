@@ -711,7 +711,7 @@ def create_gui(
                 gui_load_motion_path_text = client.gui.add_text(
                     "Load Path",
                     initial_value="output.npz",
-                    hint="SOMA .bvh, Kimodo or AMASS .npz, or G1 MuJoCo .csv",
+                    hint="SOMA .bvh, AnimBuddy or AMASS .npz, or G1 MuJoCo .csv",
                 )
                 gui_load_motion_button = client.gui.add_button(
                     "Load Motion",
@@ -865,7 +865,7 @@ def create_gui(
                         new_key = kimodo_short_key_for_skeleton_dataset(target_skel, "RP")
                     if new_key is None:
                         raise ValueError(
-                            f"No Kimodo model found for skeleton {target_skel} (motion has J={num_joints_motion})."
+                            f"No AnimBuddy model found for skeleton {target_skel} (motion has J={num_joints_motion})."
                         )
                     if new_key != session.model_name:
                         gui_model_selector.set_from_short_key(new_key)

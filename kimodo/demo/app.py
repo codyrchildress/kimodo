@@ -77,7 +77,7 @@ class Demo:
         self.server = viser.ViserServer(
             host=SERVER_NAME,
             port=SERVER_PORT,
-            label="Kimodo",
+            label="AnimBuddy",
             enable_camera_keyboard_controls=False,  # don't move the camera with the arrow keys
         )
         self.server.scene.world_axes.visible = False  # used for debugging
@@ -655,29 +655,12 @@ class Demo:
             TitlebarButton(
                 text="Github",
                 icon="GitHub",
-                href="https://github.com/nv-tlabs/kimodo",
+                href="https://github.com/codyrchildress/kimodo",
             ),
         )
-        assets_dir = DEMO_ASSETS_ROOT
-        logo_light_path = assets_dir / "nvidia_logo.png"
-        logo_dark_path = assets_dir / "nvidia_logo_dark.png"
-        if logo_light_path.exists():
-            light_b64 = base64.standard_b64encode(logo_light_path.read_bytes()).decode("ascii")
-            dark_b64 = (
-                base64.standard_b64encode(logo_dark_path.read_bytes()).decode("ascii")
-                if logo_dark_path.exists()
-                else None
-            )
-            image = TitlebarImage(
-                image_url_light=f"data:image/png;base64,{light_b64}",
-                image_url_dark=(f"data:image/png;base64,{dark_b64}" if dark_b64 else None),
-                image_alt="NVIDIA",
-                href="https://www.nvidia.com/",
-            )
-        else:
-            image = None
-        titlebar_theme = TitlebarConfig(buttons=buttons, image=image, title_text="Kimodo")
-        client.gui.set_panel_label("Kimodo")
+        image = None
+        titlebar_theme = TitlebarConfig(buttons=buttons, image=image, title_text="AnimBuddy")
+        client.gui.set_panel_label("AnimBuddy")
         client.gui.configure_theme(
             titlebar_content=titlebar_theme,
             control_layout="floating",  # "floating",  # ['floating', 'collapsible', 'fixed']
