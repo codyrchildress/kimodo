@@ -9,6 +9,7 @@ import torch
 
 from kimodo.assets import skeleton_asset_path
 
+from .ik import get_chain_indices
 from .kinematics import fk
 from .transforms import (
     from_standard_tpose,
@@ -34,6 +35,10 @@ class SkeletonBase(torch.nn.Module):
     foot_joint_idx = None
     hip_joint_names = None  # in order [right, left]
     hip_joint_idx = None  # in order [right, left]
+
+    # IK chain endpoints: {chain_name: (chain_root_joint_name, ee_joint_name)}
+    # Override in subclasses to define IK-solvable chains.
+    ik_chain_endpoints: dict = {}
 
     def __init__(
         self,
@@ -258,6 +263,20 @@ class SkeletonBase(torch.nn.Module):
     def global_rots_to_local_rots(self, global_joint_rots: torch.Tensor):
         """Convert global joint rotations to local rotations for this hierarchy."""
         return global_rots_to_local_rots(global_joint_rots, self)
+
+    def get_ik_chains(self) -> dict:
+        """Resolve IK chain endpoint names to joint index lists.
+
+        Returns:
+            Dict mapping chain name to a list of joint indices ordered from
+            chain root to end-effector.
+        """
+        chains = {}
+        for chain_name, (root_name, ee_name) in self.ik_chain_endpoints.items():
+            root_idx = self.bone_index[root_name]
+            ee_idx = self.bone_index[ee_name]
+            chains[chain_name] = get_chain_indices(self.joint_parents, ee_idx, root_idx)
+        return chains
 
     def get_skel_slice(self, skeleton: "SkeletonBase"):
         """Build index mapping from another skeleton into this skeleton order.

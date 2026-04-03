@@ -16,6 +16,14 @@ class SOMASkeleton77(SkeletonBase):
 
     name = "somaskel77"
 
+    ik_chain_endpoints = {
+        "LeftArm": ("LeftShoulder", "LeftHand"),
+        "RightArm": ("RightShoulder", "RightHand"),
+        "LeftLeg": ("LeftLeg", "LeftFoot"),
+        "RightLeg": ("RightLeg", "RightFoot"),
+        "Spine": ("Spine1", "Head"),
+    }
+
     right_foot_joint_names = [
         "RightFoot",
         "RightToeBase",
@@ -184,6 +192,14 @@ class SOMASkeleton30(SkeletonBase):
 
     name = "somaskel30"
 
+    ik_chain_endpoints = {
+        "LeftArm": ("LeftShoulder", "LeftHand"),
+        "RightArm": ("RightShoulder", "RightHand"),
+        "LeftLeg": ("LeftLeg", "LeftFoot"),
+        "RightLeg": ("RightLeg", "RightFoot"),
+        "Spine": ("Spine1", "Head"),
+    }
+
     right_foot_joint_names = [
         "RightFoot",
         "RightToeBase",
@@ -287,6 +303,15 @@ class G1Skeleton34(SkeletonBase):
     """Unitree G1 skeleton with 32 articulated joints plus 2 toe endpoints."""
 
     name = "g1skel34"
+
+    ik_chain_endpoints = {
+        "LeftArm": ("left_shoulder_pitch_skel", "left_wrist_yaw_skel"),
+        "RightArm": ("right_shoulder_pitch_skel", "right_wrist_yaw_skel"),
+        "LeftLeg": ("left_hip_pitch_skel", "left_ankle_roll_skel"),
+        "RightLeg": ("right_hip_pitch_skel", "right_ankle_roll_skel"),
+        "Spine": ("waist_yaw_skel", "waist_pitch_skel"),
+    }
+
     right_foot_joint_names = ["right_ankle_roll_skel", "right_toe_base"]
     left_foot_joint_names = ["left_ankle_roll_skel", "left_toe_base"]
     right_hand_joint_names = ["right_wrist_yaw_skel", "right_hand_roll_skel"]
@@ -339,6 +364,15 @@ class SMPLXSkeleton22(SkeletonBase):
     """SMPL-X skeleton with body-only 22 joints."""
 
     name = "smplx22"
+
+    ik_chain_endpoints = {
+        "LeftArm": ("left_collar", "left_wrist"),
+        "RightArm": ("right_collar", "right_wrist"),
+        "LeftLeg": ("left_hip", "left_ankle"),
+        "RightLeg": ("right_hip", "right_ankle"),
+        "Spine": ("spine1", "head"),
+    }
+
     right_foot_joint_names = ["right_ankle", "right_foot"]  # in order of chain
     left_foot_joint_names = ["left_ankle", "left_foot"]  # in order of chain
     right_hand_joint_names = ["right_wrist"]  # in order of chain

@@ -474,6 +474,12 @@ def create_gui(
                 initial_value="Local",
                 visible="g1" not in _model_name,
             )
+            gui_ik_fk_toggle = client.gui.add_dropdown(
+                "Edit Mode Type",
+                ("FK (per-joint)", "IK (end-effector)"),
+                initial_value="FK (per-joint)",
+                hint="FK: rotate individual joints. IK: drag hands/feet/head to target positions.",
+            )
             gui_edit_constraint_button = client.gui.add_button("Enter Editing Mode")
             gui_snap_to_constraint_button = client.gui.add_button(
                 "Snap to Constraint",
@@ -2217,14 +2223,64 @@ def create_gui(
                     on_2d_root_drag_end=_on_root2d_gizmo_release,
                     on_drag_start=_on_gizmo_drag_start,
                 )
+                if gui_ik_fk_toggle.value.startswith("IK"):
+                    motion.add_ik_gizmos(
+                        session.constraints,
+                        on_drag_start=_on_gizmo_drag_start,
+                    )
+                else:
+                    gizmo_space = "local" if "g1" in session.model_name else gui_gizmo_space_dropdown.value.lower()
+                    motion.add_joint_gizmos(
+                        session.constraints,
+                        space=gizmo_space,
+                        on_drag_start=_on_gizmo_drag_start,
+                    )
+            else:
+                exit_editing_mode(session)
+
+        @gui_ik_fk_toggle.on_update
+        def _(event: viser.GuiEvent) -> None:
+            session = get_active_session(event.client)
+            if session is None or not session.edit_mode:
+                return
+            if not session.motions:
+                return
+            motion = list(session.motions.values())[0]
+            # Clear existing editing gizmos (keep root translation gizmo)
+            if motion.joint_gizmos is not None:
+                for joint_gizmo in motion.joint_gizmos:
+                    motion.server.scene.remove_by_name(joint_gizmo.name)
+                motion.joint_gizmos = None
+            if motion.ik_gizmos is not None:
+                for gizmo in motion.ik_gizmos.values():
+                    motion.server.scene.remove_by_name(gizmo.name)
+                motion.ik_gizmos = None
+
+            def _on_gizmo_drag_start_toggle():
+                mot = list(session.motions.values())[0]
+                frame_idx = min(session.frame_idx, mot.length - 1)
+                session.undo_drag_snapshot = {
+                    "frame_idx": frame_idx,
+                    "joints_pos": mot.get_joints_pos(frame_idx),
+                    "joints_rot": mot.get_joints_rot(frame_idx),
+                }
+                gui_undo_drag_button.disabled = False
+
+            if gui_ik_fk_toggle.value.startswith("IK"):
+                gui_gizmo_space_dropdown.disabled = True
+                motion.add_ik_gizmos(
+                    session.constraints,
+                    on_drag_start=_on_gizmo_drag_start_toggle,
+                )
+            else:
+                if "g1" not in session.model_name:
+                    gui_gizmo_space_dropdown.disabled = False
                 gizmo_space = "local" if "g1" in session.model_name else gui_gizmo_space_dropdown.value.lower()
                 motion.add_joint_gizmos(
                     session.constraints,
                     space=gizmo_space,
-                    on_drag_start=_on_gizmo_drag_start,
+                    on_drag_start=_on_gizmo_drag_start_toggle,
                 )
-            else:
-                exit_editing_mode(session)
 
         @gui_reset_constraint_button.on_click
         def _(event: viser.GuiEvent) -> None:
