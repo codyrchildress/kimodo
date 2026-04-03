@@ -19,6 +19,22 @@ This repository provides:
   <img src="assets/teaser.gif" width="1280">
 </div>
 
+## Fork Changes: IK Rig Controls
+
+This fork adds **inverse kinematic (IK) editing controls** to the interactive demo's edit mode. Instead of rotating each joint individually (FK mode), you can switch to IK mode and drag end-effectors (hands, feet, head) to a target position -- the upstream joint chain solves automatically using the [FABRIK](https://www.sciencedirect.com/science/article/pii/S1524070311000178) algorithm.
+
+### How to use
+1. Launch the demo with `kimodo_demo`
+2. Generate a motion, then click **Enter Editing Mode**
+3. Change the **Edit Mode Type** dropdown from "FK (per-joint)" to "IK (end-effector)"
+4. Drag the gizmos on the hands, feet, or head to reposition them -- the arm, leg, or spine chain follows automatically
+
+IK chains are defined for all four skeleton types (SOMA77, SOMA30, G1, SMPLX22) covering left/right arms, left/right legs, and the spine.
+
+### Planned features
+- Full-body IK solving (multi-chain simultaneous solve with balance/center-of-mass awareness)
+- Animator-friendly hotkeys for common editing operations
+
 ## News
 
 See the [full changelog](CHANGELOG.md) for a detailed list of all changes.
