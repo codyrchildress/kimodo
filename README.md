@@ -1,4 +1,10 @@
 <p align="center">
+  <a href="https://www.youtube.com/watch?v=7-MC1nMjgwk">
+    <img src="https://img.youtube.com/vi/7-MC1nMjgwk/maxresdefault.jpg" alt="AnimBuddy Demo" width="100%">
+  </a>
+</p>
+
+<p align="center">
   <img src="./assets/banner.png" alt="Banner" width="100%">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-76B900.svg" alt="License"></a>
   <a href="https://research.nvidia.com/labs/sil/projects/kimodo/"><img src="https://img.shields.io/badge/Project-Page-blue" alt="Project Page"></a>
