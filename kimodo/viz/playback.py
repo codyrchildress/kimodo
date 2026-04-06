@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Playback and motion editing: CharacterMotion."""
 
+import threading
 from typing import Callable, Literal, Optional
 
 import numpy as np
@@ -70,6 +71,9 @@ class CharacterMotion:
         self.updating_ik_gizmos = False
         self._ik_gizmo_dragging: dict[str, bool] = {}
         self._ik_chains: Optional[dict] = None  # cached chain definitions
+
+        # Lock to prevent concurrent pose edits (IK/FK gizmo callbacks can overlap)
+        self._pose_edit_lock = threading.Lock()
 
     def precompute_mesh_info(self):
         if self.character.skeleton_mesh is not None:
@@ -567,151 +571,156 @@ class CharacterMotion:
 
                 @cur_joint_gizmo.on_update
                 def _(_) -> None:
-                    self.updating_joint_gizmos = True
-                    new_local_joint_rots = self.joints_local_rot[self.cur_frame_idx].clone()
-                    # Gizmo parent is identity; client sends rotation as wxyz.
-                    # World mode: wxyz is cumulative from identity, compose with
-                    # stored initial world rotation. Local mode: wxyz is new world rotation.
-                    gizmo_rot_mat = tf.SO3(self.joint_gizmos[i].wxyz).as_matrix()
-                    if self.gizmo_space == "world" and self._drag_start_world_rot[i] is not None:
-                        new_world_rot_mat = gizmo_rot_mat @ self._drag_start_world_rot[i]
-                    else:
-                        new_world_rot_mat = gizmo_rot_mat
-                    parent_idx = self.skeleton.joint_parents[i].item()
-                    if parent_idx >= 0:
-                        R_parent_world = self.joints_rot[self.cur_frame_idx, parent_idx].detach().cpu().numpy()
-                        new_local_rot_mat_np = (R_parent_world.T @ new_world_rot_mat).astype(np.float32)
-                    else:
-                        new_local_rot_mat_np = new_world_rot_mat.astype(np.float32)
-                    new_local_rot = tf.SO3.from_matrix(new_local_rot_mat_np)
-                    joint_name = self.skeleton.bone_order_names[i]
-                    if joint_f2q_data is not None and joint_name in joint_f2q_data:
-                        # G1 hinge: use offset (f2q) space so 1-DoF and limits match the robot.
-                        # R_f2q = offset_f2q @ R_local; angle_f2q = dot(axis_angle(R_f2q), axis_f2q);
-                        # MuJoCo q = angle_f2q - rest_dof; limits apply to q.
-                        f2q = joint_f2q_data[joint_name]
-                        offset_f2q = f2q["offset_f2q"]
-                        axis_f2q = f2q["axis_f2q"]
-                        rest_dof = f2q["rest_dof_axis_angle"]
-                        R_local = new_local_rot_mat_np.astype(np.float64)
-                        R_f2q = offset_f2q @ R_local
-                        rotvec = tf.SO3.from_matrix(R_f2q).log()
-                        angle_f2q = float(np.dot(rotvec, axis_f2q))
-                        # Keep angle continuous relative to current pose.
-                        current_R_f2q = offset_f2q @ (
-                            self.joints_local_rot[self.cur_frame_idx, i].detach().cpu().numpy().astype(np.float64)
-                        )
-                        current_angle_f2q = float(np.dot(tf.SO3.from_matrix(current_R_f2q).log(), axis_f2q))
-                        two_pi = 2.0 * np.pi
-                        angle_f2q = angle_f2q + two_pi * np.round((current_angle_f2q - angle_f2q) / two_pi)
-                        q = angle_f2q - rest_dof
-                        if joint_limits is not None:
-                            joint_limit = joint_limits.get(joint_name)
-                            if joint_limit is not None:
-                                q = float(np.clip(q, joint_limit[0], joint_limit[1]))
-                        angle_f2q = q + rest_dof
-                        R_f2q_new = tf.SO3.exp(angle_f2q * axis_f2q).as_matrix()
-                        new_local_rot_mat_np = (offset_f2q.T @ R_f2q_new).astype(np.float32)
-                    elif joint_axis_indices is not None:
-                        axis_idx = joint_axis_indices.get(joint_name)
-                        if axis_idx is not None:
-                            rotvec = new_local_rot.log()
-                            axis = np.zeros(3, dtype=np.float64)
-                            axis[axis_idx] = 1.0
-                            angle = float(rotvec[axis_idx])
+                    if not self._pose_edit_lock.acquire(blocking=False):
+                        return  # skip if another edit is in progress
+                    try:
+                        self.updating_joint_gizmos = True
+                        new_local_joint_rots = self.joints_local_rot[self.cur_frame_idx].clone()
+                        # Gizmo parent is identity; client sends rotation as wxyz.
+                        # World mode: wxyz is cumulative from identity, compose with
+                        # stored initial world rotation. Local mode: wxyz is new world rotation.
+                        gizmo_rot_mat = tf.SO3(self.joint_gizmos[i].wxyz).as_matrix()
+                        if self.gizmo_space == "world" and self._drag_start_world_rot[i] is not None:
+                            new_world_rot_mat = gizmo_rot_mat @ self._drag_start_world_rot[i]
+                        else:
+                            new_world_rot_mat = gizmo_rot_mat
+                        parent_idx = self.skeleton.joint_parents[i].item()
+                        if parent_idx >= 0:
+                            R_parent_world = self.joints_rot[self.cur_frame_idx, parent_idx].detach().cpu().numpy()
+                            new_local_rot_mat_np = (R_parent_world.T @ new_world_rot_mat).astype(np.float32)
+                        else:
+                            new_local_rot_mat_np = new_world_rot_mat.astype(np.float32)
+                        new_local_rot = tf.SO3.from_matrix(new_local_rot_mat_np)
+                        joint_name = self.skeleton.bone_order_names[i]
+                        if joint_f2q_data is not None and joint_name in joint_f2q_data:
+                            # G1 hinge: use offset (f2q) space so 1-DoF and limits match the robot.
+                            # R_f2q = offset_f2q @ R_local; angle_f2q = dot(axis_angle(R_f2q), axis_f2q);
+                            # MuJoCo q = angle_f2q - rest_dof; limits apply to q.
+                            f2q = joint_f2q_data[joint_name]
+                            offset_f2q = f2q["offset_f2q"]
+                            axis_f2q = f2q["axis_f2q"]
+                            rest_dof = f2q["rest_dof_axis_angle"]
+                            R_local = new_local_rot_mat_np.astype(np.float64)
+                            R_f2q = offset_f2q @ R_local
+                            rotvec = tf.SO3.from_matrix(R_f2q).log()
+                            angle_f2q = float(np.dot(rotvec, axis_f2q))
                             # Keep angle continuous relative to current pose.
-                            current_rot = tf.SO3.from_matrix(
-                                self.joints_local_rot[self.cur_frame_idx, i].detach().cpu().numpy()
+                            current_R_f2q = offset_f2q @ (
+                                self.joints_local_rot[self.cur_frame_idx, i].detach().cpu().numpy().astype(np.float64)
                             )
-                            current_angle = float(current_rot.log()[axis_idx])
+                            current_angle_f2q = float(np.dot(tf.SO3.from_matrix(current_R_f2q).log(), axis_f2q))
                             two_pi = 2.0 * np.pi
-                            angle = angle + two_pi * np.round((current_angle - angle) / two_pi)
+                            angle_f2q = angle_f2q + two_pi * np.round((current_angle_f2q - angle_f2q) / two_pi)
+                            q = angle_f2q - rest_dof
                             if joint_limits is not None:
                                 joint_limit = joint_limits.get(joint_name)
                                 if joint_limit is not None:
-                                    angle = float(np.clip(angle, joint_limit[0], joint_limit[1]))
-                            new_local_rot_mat_np = tf.SO3.exp(angle * axis).as_matrix()
-                    new_local_rot_mat = torch.tensor(new_local_rot_mat_np).to(new_local_joint_rots.device)
-                    new_local_joint_rots[i] = new_local_rot_mat
+                                    q = float(np.clip(q, joint_limit[0], joint_limit[1]))
+                            angle_f2q = q + rest_dof
+                            R_f2q_new = tf.SO3.exp(angle_f2q * axis_f2q).as_matrix()
+                            new_local_rot_mat_np = (offset_f2q.T @ R_f2q_new).astype(np.float32)
+                        elif joint_axis_indices is not None:
+                            axis_idx = joint_axis_indices.get(joint_name)
+                            if axis_idx is not None:
+                                rotvec = new_local_rot.log()
+                                axis = np.zeros(3, dtype=np.float64)
+                                axis[axis_idx] = 1.0
+                                angle = float(rotvec[axis_idx])
+                                # Keep angle continuous relative to current pose.
+                                current_rot = tf.SO3.from_matrix(
+                                    self.joints_local_rot[self.cur_frame_idx, i].detach().cpu().numpy()
+                                )
+                                current_angle = float(current_rot.log()[axis_idx])
+                                two_pi = 2.0 * np.pi
+                                angle = angle + two_pi * np.round((current_angle - angle) / two_pi)
+                                if joint_limits is not None:
+                                    joint_limit = joint_limits.get(joint_name)
+                                    if joint_limit is not None:
+                                        angle = float(np.clip(angle, joint_limit[0], joint_limit[1]))
+                                new_local_rot_mat_np = tf.SO3.exp(angle * axis).as_matrix()
+                        new_local_rot_mat = torch.tensor(new_local_rot_mat_np).to(new_local_joint_rots.device)
+                        new_local_joint_rots[i] = new_local_rot_mat
 
-                    self.update_pose_at_frame(
-                        self.cur_frame_idx,
-                        joints_local_rot=new_local_joint_rots,
-                    )
+                        self.update_pose_at_frame(
+                            self.cur_frame_idx,
+                            joints_local_rot=new_local_joint_rots,
+                        )
 
-                    # handle root translation separately
-                    cur_joints_pos = self.joints_pos[self.cur_frame_idx].clone()
-                    if i == self.skeleton.root_idx:
-                        new_root_pos = to_torch(
-                            self.joint_gizmos[i].position,
-                            device=self.joints_pos.device,
-                        ).to(dtype=self.joints_pos.dtype)
-                        root_diff = new_root_pos - self.joints_pos[self.cur_frame_idx, i]
-                        if torch.norm(root_diff) > 1e-3:
-                            # the root translation has been changed
-                            # translate to gizmo position
-                            cur_joints_pos += root_diff[None]
-                            self.update_pose_at_frame(
-                                self.cur_frame_idx,
-                                joints_pos=cur_joints_pos,
-                                joints_rot=self.joints_rot[self.cur_frame_idx],
-                                joints_local_rot=self.joints_local_rot[self.cur_frame_idx],
-                            )
+                        # handle root translation separately
+                        cur_joints_pos = self.joints_pos[self.cur_frame_idx].clone()
+                        if i == self.skeleton.root_idx:
+                            new_root_pos = to_torch(
+                                self.joint_gizmos[i].position,
+                                device=self.joints_pos.device,
+                            ).to(dtype=self.joints_pos.dtype)
+                            root_diff = new_root_pos - self.joints_pos[self.cur_frame_idx, i]
+                            if torch.norm(root_diff) > 1e-3:
+                                # the root translation has been changed
+                                # translate to gizmo position
+                                cur_joints_pos += root_diff[None]
+                                self.update_pose_at_frame(
+                                    self.cur_frame_idx,
+                                    joints_pos=cur_joints_pos,
+                                    joints_rot=self.joints_rot[self.cur_frame_idx],
+                                    joints_local_rot=self.joints_local_rot[self.cur_frame_idx],
+                                )
 
-                    # update immediately to show user changes. Keep updating_joint_gizmos
-                    # True so set_frame does not overwrite gizmo wxyz mid-drag.
-                    self.set_frame(self.cur_frame_idx)
-                    self.updating_joint_gizmos = False
+                        # update immediately to show user changes. Keep updating_joint_gizmos
+                        # True so set_frame does not overwrite gizmo wxyz mid-drag.
+                        self.set_frame(self.cur_frame_idx)
+                        self.updating_joint_gizmos = False
 
-                    if i == self.skeleton.root_idx:
-                        # update the 2D waypoint constraints as well if there is one
-                        if "2D Root" in constraints:
-                            root_2d_contraints = constraints["2D Root"]
+                        if i == self.skeleton.root_idx:
+                            # update the 2D waypoint constraints as well if there is one
+                            if "2D Root" in constraints:
+                                root_2d_contraints = constraints["2D Root"]
+                                # if there is a constraint at that frame, we want to update it
+                                frame_idx = self.cur_frame_idx
+                                if frame_idx in root_2d_contraints.keyframes:
+                                    new_root_pos[1] = 0.0  # force y to 0
+                                    for keyframe_id in root_2d_contraints.frame2keyid[frame_idx]:
+                                        # add will modify the existing constraint
+                                        root_2d_contraints.add_keyframe(
+                                            keyframe_id,
+                                            frame_idx,
+                                            root_pos=new_root_pos,
+                                            exists_ok=True,
+                                            update_path=False,
+                                        )
+
+                        if "Full-Body" in constraints:
+                            full_body_constraints = constraints["Full-Body"]
                             # if there is a constraint at that frame, we want to update it
                             frame_idx = self.cur_frame_idx
-                            if frame_idx in root_2d_contraints.keyframes:
-                                new_root_pos[1] = 0.0  # force y to 0
-                                for keyframe_id in root_2d_contraints.frame2keyid[frame_idx]:
+                            if frame_idx in full_body_constraints.keyframes:
+                                for keyframe_id in full_body_constraints.frame2keyid[frame_idx]:
                                     # add will modify the existing constraint
-                                    root_2d_contraints.add_keyframe(
+                                    full_body_constraints.add_keyframe(
                                         keyframe_id,
                                         frame_idx,
-                                        root_pos=new_root_pos,
+                                        joints_pos=self.joints_pos[frame_idx],
+                                        joints_rot=self.joints_rot[frame_idx],
                                         exists_ok=True,
-                                        update_path=False,
                                     )
-
-                    if "Full-Body" in constraints:
-                        full_body_constraints = constraints["Full-Body"]
-                        # if there is a constraint at that frame, we want to update it
-                        frame_idx = self.cur_frame_idx
-                        if frame_idx in full_body_constraints.keyframes:
-                            for keyframe_id in full_body_constraints.frame2keyid[frame_idx]:
-                                # add will modify the existing constraint
-                                full_body_constraints.add_keyframe(
-                                    keyframe_id,
-                                    frame_idx,
-                                    joints_pos=self.joints_pos[frame_idx],
-                                    joints_rot=self.joints_rot[frame_idx],
-                                    exists_ok=True,
-                                )
-                    if "End-Effectors" in constraints:
-                        end_effector_constraints = constraints["End-Effectors"]
-                        # if there is a constraint at that frame, we want to update it
-                        frame_idx = self.cur_frame_idx
-                        if frame_idx in end_effector_constraints.keyframes:
-                            current_dict = end_effector_constraints.keyframes[frame_idx]
-                            for keyframe_id, _ in end_effector_constraints.frame2keyid[frame_idx]:
-                                # add will modify the existing constraint
-                                end_effector_constraints.add_keyframe(
-                                    keyframe_id,
-                                    frame_idx,
-                                    joints_pos=self.joints_pos[frame_idx],
-                                    joints_rot=self.joints_rot[frame_idx],
-                                    joint_names=current_dict["joint_names"],
-                                    end_effector_type=current_dict["end_effector_type"],
-                                    exists_ok=True,
-                                )
+                        if "End-Effectors" in constraints:
+                            end_effector_constraints = constraints["End-Effectors"]
+                            # if there is a constraint at that frame, we want to update it
+                            frame_idx = self.cur_frame_idx
+                            if frame_idx in end_effector_constraints.keyframes:
+                                current_dict = end_effector_constraints.keyframes[frame_idx]
+                                for keyframe_id, _ in end_effector_constraints.frame2keyid[frame_idx]:
+                                    # add will modify the existing constraint
+                                    end_effector_constraints.add_keyframe(
+                                        keyframe_id,
+                                        frame_idx,
+                                        joints_pos=self.joints_pos[frame_idx],
+                                        joints_rot=self.joints_rot[frame_idx],
+                                        joint_names=current_dict["joint_names"],
+                                        end_effector_type=current_dict["end_effector_type"],
+                                        exists_ok=True,
+                                    )
+                    finally:
+                        self._pose_edit_lock.release()
 
             set_callback_in_closure(joint_idx)
 
@@ -765,62 +774,69 @@ class CharacterMotion:
 
                 @gizmo.on_update
                 def _(_):
-                    self.updating_ik_gizmos = True
-                    target_pos = to_torch(
-                        self.ik_gizmos[cname].position,
-                        device=self.joints_pos.device,
-                    ).to(dtype=self.joints_pos.dtype)
+                    if not self._pose_edit_lock.acquire(blocking=False):
+                        return  # skip if another edit is in progress
+                    try:
+                        self.updating_ik_gizmos = True
+                        target_pos = to_torch(
+                            self.ik_gizmos[cname].position,
+                            device=self.joints_pos.device,
+                        ).to(dtype=self.joints_pos.dtype)
 
-                    new_joints_pos, new_local_rots, new_global_rots = solve_ik_chain(
-                        self.skeleton,
-                        self.joints_pos[self.cur_frame_idx],
-                        self.joints_rot[self.cur_frame_idx],
-                        self.joints_local_rot[self.cur_frame_idx],
-                        cindices,
-                        target_pos,
-                    )
+                        new_joints_pos, new_local_rots, new_global_rots = solve_ik_chain(
+                            self.skeleton,
+                            self.joints_pos[self.cur_frame_idx],
+                            self.joints_rot[self.cur_frame_idx],
+                            self.joints_local_rot[self.cur_frame_idx],
+                            cindices,
+                            target_pos,
+                        )
 
-                    self.update_pose_at_frame(
-                        self.cur_frame_idx,
-                        joints_pos=new_joints_pos,
-                        joints_rot=new_global_rots,
-                        joints_local_rot=new_local_rots,
-                    )
+                        self.update_pose_at_frame(
+                            self.cur_frame_idx,
+                            joints_pos=new_joints_pos,
+                            joints_rot=new_global_rots,
+                            joints_local_rot=new_local_rots,
+                        )
 
-                    self.set_frame(self.cur_frame_idx)
-                    self.updating_ik_gizmos = False
+                        self.set_frame(self.cur_frame_idx)
 
-                    # Update constraints (same pattern as FK gizmos)
-                    frame_idx = self.cur_frame_idx
-                    if "Full-Body" in constraints:
-                        full_body_constraints = constraints["Full-Body"]
-                        if frame_idx in full_body_constraints.keyframes:
-                            for keyframe_id in full_body_constraints.frame2keyid[frame_idx]:
-                                full_body_constraints.add_keyframe(
-                                    keyframe_id,
-                                    frame_idx,
-                                    joints_pos=self.joints_pos[frame_idx],
-                                    joints_rot=self.joints_rot[frame_idx],
-                                    exists_ok=True,
-                                )
-                    if "End-Effectors" in constraints:
-                        end_effector_constraints = constraints["End-Effectors"]
-                        if frame_idx in end_effector_constraints.keyframes:
-                            current_dict = end_effector_constraints.keyframes[frame_idx]
-                            for keyframe_id, _ in end_effector_constraints.frame2keyid[frame_idx]:
-                                end_effector_constraints.add_keyframe(
-                                    keyframe_id,
-                                    frame_idx,
-                                    joints_pos=self.joints_pos[frame_idx],
-                                    joints_rot=self.joints_rot[frame_idx],
-                                    joint_names=current_dict["joint_names"],
-                                    end_effector_type=current_dict["end_effector_type"],
-                                    exists_ok=True,
-                                )
+                        # Update constraints (same pattern as FK gizmos)
+                        frame_idx = self.cur_frame_idx
+                        if "Full-Body" in constraints:
+                            full_body_constraints = constraints["Full-Body"]
+                            if frame_idx in full_body_constraints.keyframes:
+                                for keyframe_id in full_body_constraints.frame2keyid[frame_idx]:
+                                    full_body_constraints.add_keyframe(
+                                        keyframe_id,
+                                        frame_idx,
+                                        joints_pos=self.joints_pos[frame_idx],
+                                        joints_rot=self.joints_rot[frame_idx],
+                                        exists_ok=True,
+                                    )
+                        if "End-Effectors" in constraints:
+                            end_effector_constraints = constraints["End-Effectors"]
+                            if frame_idx in end_effector_constraints.keyframes:
+                                current_dict = end_effector_constraints.keyframes[frame_idx]
+                                for keyframe_id, _ in end_effector_constraints.frame2keyid[frame_idx]:
+                                    end_effector_constraints.add_keyframe(
+                                        keyframe_id,
+                                        frame_idx,
+                                        joints_pos=self.joints_pos[frame_idx],
+                                        joints_rot=self.joints_rot[frame_idx],
+                                        joint_names=current_dict["joint_names"],
+                                        end_effector_type=current_dict["end_effector_type"],
+                                        exists_ok=True,
+                                    )
+
+                        self.updating_ik_gizmos = False
+                    finally:
+                        self._pose_edit_lock.release()
 
                 @gizmo.on_drag_end
                 def _(_):
                     self._ik_gizmo_dragging[cname] = False
+                    self.updating_ik_gizmos = False
                     g = self.ik_gizmos[cname]
                     ee_idx = cindices[-1]
                     g.sync_position(self.joints_pos[self.cur_frame_idx, ee_idx].cpu().numpy())

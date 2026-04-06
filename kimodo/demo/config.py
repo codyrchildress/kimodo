@@ -93,6 +93,31 @@ DEMO_UI_QUICK_START_CORE_MD = """
 - To **edit** a constraint:
     - Move playback to the target frame
     - Click **Enter Editing Mode** in the Constraints tab.
+
+### Keyboard Shortcuts
+
+**Playback:**
+- **Space**: Play / Pause
+- **Left / Right Arrow**: Step one frame back / forward
+- **,** (comma): Jump to previous keyframe
+- **.** (period): Jump to next keyframe
+
+**Editing:**
+- **Alt+Q**: Enter / exit edit mode
+- **Alt+W**: Switch to IK mode (move tool)
+- **Alt+E**: Switch to FK mode (rotate tool)
+- **Z**: Undo last drag
+
+**Keyframes:**
+- **Alt+S**: Set Full-Body keyframe at current frame
+- **Delete / Backspace**: Delete all keyframes at current frame
+
+**Generation:**
+- **G**: Generate motion (exits edit mode automatically if needed)
+
+**Pose:**
+- **Ctrl+C**: Copy pose at current frame
+- **Ctrl+V**: Paste copied pose to current frame (edit mode only)
 """
 
 DEMO_UI_QUICK_START_MODAL_MD = (

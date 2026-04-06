@@ -2157,28 +2157,19 @@ def create_gui(
             gui_viz_skinned_mesh_checkbox.value = True
             gui_viz_skeleton_checkbox.value = False
 
-        # enter editing mode callback
-        @gui_edit_constraint_button.on_click
-        def _(event: viser.GuiEvent) -> None:
-            event_client = event.client
-            session = get_active_session(event_client)
-            if session is None:
-                return
-
+        def toggle_edit_mode(session: ClientSession) -> None:
+            """Toggle edit mode on/off. Called by button and Q hotkey."""
             session.edit_mode = not session.edit_mode
 
-            edit_alert = "Entered editing mode"
-            no_edit_alert = "Exited editing mode"
-            edit_message = "You can now modify pose or path constraints."
-            no_edit_message = "Can now generate motions."
-            event_client.add_notification(
-                title=edit_alert if session.edit_mode else no_edit_alert,
-                body=edit_message if session.edit_mode else no_edit_message,
+            session.client.add_notification(
+                title="Entered editing mode" if session.edit_mode else "Exited editing mode",
+                body="You can now modify pose or path constraints." if session.edit_mode else "Can now generate motions.",
                 auto_close_seconds=10.0,
                 color="blue",
             )
 
             if session.edit_mode:
+                session.playing = False
                 gui_edit_constraint_button.label = "Exit Editing Mode"
                 gui_generate_button.disabled = True
                 gui_generate_button.label = "Generate Disabled In Editing Mode"
@@ -2195,14 +2186,12 @@ def create_gui(
                 gui_reset_constraint_button.disabled = False
 
                 motion.character.set_skeleton_visibility(True)
-                # motion.character.set_skinned_mesh_wireframe(True)
                 motion.character.set_skinned_mesh_opacity(0.65)
                 session.gui_elements.gui_viz_skinned_mesh_opacity_slider.value = 0.65
                 motion.character.set_skinned_mesh_visibility(True)
                 gui_viz_skinned_mesh_checkbox.value = True
                 gui_viz_skeleton_checkbox.value = True
 
-                # need gizmos for root translation and individual joints
                 def _on_root2d_gizmo_release():
                     if "2D Root" in session.constraints and session.constraints["2D Root"].dense_path:
                         mot = list(session.motions.values())[0]
@@ -2238,12 +2227,17 @@ def create_gui(
             else:
                 exit_editing_mode(session)
 
-        @gui_ik_fk_toggle.on_update
+        # enter editing mode callback
+        @gui_edit_constraint_button.on_click
         def _(event: viser.GuiEvent) -> None:
             session = get_active_session(event.client)
-            if session is None or not session.edit_mode:
+            if session is None:
                 return
-            if not session.motions:
+            toggle_edit_mode(session)
+
+        def switch_ik_fk_mode(session: ClientSession) -> None:
+            """Switch gizmos to match the current gui_ik_fk_toggle value. Called by dropdown and hotkeys."""
+            if not session.edit_mode or not session.motions:
                 return
             motion = list(session.motions.values())[0]
             # Clear existing editing gizmos (keep root translation gizmo)
@@ -2282,6 +2276,13 @@ def create_gui(
                     on_drag_start=_on_gizmo_drag_start_toggle,
                 )
 
+        @gui_ik_fk_toggle.on_update
+        def _(event: viser.GuiEvent) -> None:
+            session = get_active_session(event.client)
+            if session is None:
+                return
+            switch_ik_fk_mode(session)
+
         @gui_reset_constraint_button.on_click
         def _(event: viser.GuiEvent) -> None:
             event_client = event.client
@@ -2302,14 +2303,9 @@ def create_gui(
             )
             demo.set_frame(event_client.client_id, snapshot_frame_idx, update_timeline=False)
 
-        @gui_undo_drag_button.on_click
-        def _(event: viser.GuiEvent) -> None:
-            event_client = event.client
-            session = get_active_session(event_client)
-            if session is None or session.undo_drag_snapshot is None:
-                return
-
-            if not session.motions:
+        def undo_last_drag(session: ClientSession) -> None:
+            """Undo the last gizmo drag. Called by button and Z hotkey."""
+            if session.undo_drag_snapshot is None or not session.motions:
                 return
             motion = list(session.motions.values())[0]
             frame_idx = session.undo_drag_snapshot["frame_idx"]
@@ -2318,9 +2314,16 @@ def create_gui(
                 joints_pos=session.undo_drag_snapshot["joints_pos"],
                 joints_rot=session.undo_drag_snapshot["joints_rot"],
             )
-            demo.set_frame(event_client.client_id, frame_idx, update_timeline=False)
+            demo.set_frame(session.client.client_id, frame_idx, update_timeline=False)
             session.undo_drag_snapshot = None
             gui_undo_drag_button.disabled = True
+
+        @gui_undo_drag_button.on_click
+        def _(event: viser.GuiEvent) -> None:
+            session = get_active_session(event.client)
+            if session is None:
+                return
+            undo_last_drag(session)
 
         def validate_interval(start_frame_idx: int, end_frame_idx: int, max_frame_idx: int) -> bool:
             if start_frame_idx < 0 or start_frame_idx > max_frame_idx:
@@ -2838,13 +2841,9 @@ def create_gui(
                     session.constraints["2D Root"].set_dense_path(False)
 
         # generation callback
-        @gui_generate_button.on_click
-        def _(event: viser.GuiEvent) -> None:
-            event_client = event.client
-            session = get_active_session(event_client)
-            if session is None:
-                return
-
+        def run_generate(session: ClientSession) -> None:
+            """Run motion generation. Called by button and G hotkey."""
+            event_client = session.client
             generating_notif = event_client.add_notification(
                 title="Generating motion...",
                 body="Generating motions for the given prompt!",
@@ -2999,6 +2998,13 @@ def create_gui(
                         pass
                 demo.check_cuda_health()
 
+        @gui_generate_button.on_click
+        def _(event: viser.GuiEvent) -> None:
+            session = get_active_session(event.client)
+            if session is None:
+                return
+            run_generate(session)
+
     #
     # Visualization settings
     #
@@ -3118,7 +3124,7 @@ def create_gui(
             )
             gui_dark_mode_checkbox = client.gui.add_checkbox(
                 "Dark Mode",
-                initial_value=False,  # Default to light mode
+                initial_value=True,  # Default to dark mode
             )
             gui_show_constraint_tracks_checkbox.visible = gui_show_timeline_checkbox.value
             demo.set_start_direction_visible(client_id, gui_show_starting_direction_checkbox.value)
@@ -3254,6 +3260,178 @@ def create_gui(
             prev_frame_callback(session)
         elif event.key == "ArrowRight":
             next_frame_callback(session)
+
+        # --- Animator hotkeys ---
+
+        # Alt+Q: toggle edit mode
+        elif event.key.lower() in ("q", "œ") and event.alt_key and not event.ctrl_key:
+            if session.motions:
+                toggle_edit_mode(session)
+
+        # Alt+S: set Full-Body keyframe at current frame
+        elif event.key.lower() in ("s", "ß", "í") and event.alt_key and not event.ctrl_key:
+            if not session.motions:
+                return
+            with session.timeline_data["keyframe_update_lock"]:
+                fullbody_track_id = session.timeline_data["tracks_ids"].get("Full-Body")
+                if fullbody_track_id is None:
+                    return
+                frame = session.frame_idx
+                # Check if keyframe already exists at this frame on Full-Body track
+                for kf in session.timeline_data["keyframes"].values():
+                    if kf["track_id"] == fullbody_track_id and kf["frame"] == frame:
+                        event.client.add_notification(
+                            title="Keyframe exists",
+                            body=f"Full-Body keyframe already at frame {frame}",
+                            auto_close_seconds=2.0,
+                            color="yellow",
+                        )
+                        return
+                keyframe_id = client.timeline.add_keyframe(fullbody_track_id, frame)
+                add_constraint_callback(keyframe_id, "Full-Body", (frame, frame), verbose=False)
+                session.timeline_data["keyframes"][keyframe_id] = {
+                    "frame": frame,
+                    "track_id": fullbody_track_id,
+                    "locked": False,
+                    "opacity": 1.0,
+                    "value": None,
+                }
+            event.client.add_notification(
+                title="Keyframe set",
+                body=f"Full-Body keyframe at frame {frame}",
+                auto_close_seconds=2.0,
+                color="blue",
+            )
+
+        # Period: jump to next keyframe
+        elif event.key == "." and not event.ctrl_key:
+            frames = sorted(set(kf["frame"] for kf in session.timeline_data["keyframes"].values()))
+            for f in frames:
+                if f > session.frame_idx:
+                    demo.set_frame(client_id, f)
+                    break
+
+        # Comma: jump to previous keyframe
+        elif event.key == "," and not event.ctrl_key:
+            frames = sorted(set(kf["frame"] for kf in session.timeline_data["keyframes"].values()), reverse=True)
+            for f in frames:
+                if f < session.frame_idx:
+                    demo.set_frame(client_id, f)
+                    break
+
+        # Alt+W: switch to IK mode (edit mode only)
+        elif event.key.lower() in ("w", "∑") and event.alt_key and not event.ctrl_key:
+            if session.edit_mode and not gui_ik_fk_toggle.value.startswith("IK"):
+                gui_ik_fk_toggle.value = "IK (end-effector)"
+                switch_ik_fk_mode(session)
+
+        # Alt+E: switch to FK mode (edit mode only)
+        elif event.key.lower() in ("e", "´") and event.alt_key and not event.ctrl_key:
+            if session.edit_mode and not gui_ik_fk_toggle.value.startswith("FK"):
+                gui_ik_fk_toggle.value = "FK (per-joint)"
+                switch_ik_fk_mode(session)
+
+        # Z: undo last drag (edit mode only)
+        elif event.key == "z" and not event.ctrl_key:
+            if session.edit_mode:
+                undo_last_drag(session)
+
+        # Delete/Backspace: delete all keyframes at current frame
+        elif event.key in ("Delete", "Backspace") and not event.ctrl_key:
+            frame = session.frame_idx
+            with session.timeline_data["keyframe_update_lock"]:
+                to_delete = [
+                    (kid, kf)
+                    for kid, kf in session.timeline_data["keyframes"].items()
+                    if kf["frame"] == frame
+                ]
+                if not to_delete:
+                    event.client.add_notification(
+                        title="No keyframe",
+                        body=f"No keyframes at frame {frame}",
+                        auto_close_seconds=2.0,
+                        color="yellow",
+                    )
+                    return
+                for kid, kf in to_delete:
+                    track_id = kf["track_id"]
+                    constraint_type = session.timeline_data["tracks"][track_id]["name"]
+                    remove_constraint_callback(kid, constraint_type, (frame, frame), verbose=False)
+                    client.timeline.remove_keyframe(kid)
+                    del session.timeline_data["keyframes"][kid]
+                # Update dense path if needed
+                if "2D Root" in session.constraints and session.constraints["2D Root"].dense_path:
+                    motion = list(session.motions.values())[0]
+                    _update_dense_path(motion, session)
+            event.client.add_notification(
+                title="Keyframes deleted",
+                body=f"Deleted {len(to_delete)} keyframe(s) at frame {frame}",
+                auto_close_seconds=2.0,
+                color="blue",
+            )
+
+        # Ctrl+C: copy pose at current frame
+        elif event.key == "c" and event.ctrl_key:
+            if not session.motions:
+                return
+            motion = list(session.motions.values())[0]
+            frame = min(session.frame_idx, motion.length - 1)
+            session.pose_clipboard = {
+                "joints_pos": motion.get_joints_pos(frame),
+                "joints_rot": motion.get_joints_rot(frame),
+            }
+            event.client.add_notification(
+                title="Pose copied",
+                body=f"Copied pose from frame {frame}",
+                auto_close_seconds=2.0,
+                color="blue",
+            )
+
+        # Ctrl+V: paste pose to current frame (edit mode only)
+        elif event.key == "v" and event.ctrl_key:
+            if session.pose_clipboard is None:
+                event.client.add_notification(
+                    title="No pose", body="Copy a pose first with Ctrl+C",
+                    auto_close_seconds=2.0, color="yellow",
+                )
+                return
+            if not session.edit_mode:
+                event.client.add_notification(
+                    title="Not in edit mode", body="Press Q to enter edit mode first",
+                    auto_close_seconds=2.0, color="yellow",
+                )
+                return
+            if not session.motions:
+                return
+            motion = list(session.motions.values())[0]
+            frame = min(session.frame_idx, motion.length - 1)
+            # Save undo snapshot
+            session.undo_drag_snapshot = {
+                "frame_idx": frame,
+                "joints_pos": motion.get_joints_pos(frame),
+                "joints_rot": motion.get_joints_rot(frame),
+            }
+            gui_undo_drag_button.disabled = False
+            motion.update_pose_at_frame(
+                frame,
+                joints_pos=session.pose_clipboard["joints_pos"],
+                joints_rot=session.pose_clipboard["joints_rot"],
+            )
+            demo.set_frame(client_id, frame, update_timeline=False)
+            event.client.add_notification(
+                title="Pose pasted",
+                body=f"Pasted pose to frame {frame}",
+                auto_close_seconds=2.0,
+                color="blue",
+            )
+
+        # G: generate motion (exits edit mode first if needed)
+        elif event.key == "g" and not event.ctrl_key and not event.alt_key:
+            if session.edit_mode:
+                toggle_edit_mode(session)
+            if gui_generate_button.disabled:
+                return
+            run_generate(session)
 
     gui_elements = GuiElements(
         gui_play_pause_button=gui_play_pause_button,
