@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Inverse-kinematics primitives using the FABRIK algorithm."""
+"""Inverse-kinematics primitives: analytic two-bone IK with pole vector and FABRIK fallback."""
 
 from typing import List, Optional
 
@@ -97,6 +97,121 @@ def _get_rest_bone_lengths(skeleton, chain_indices: List[int], device, dtype) ->
     for i in range(len(chain_indices) - 1):
         bone_lengths[i] = (neutral[chain_indices[i + 1]] - neutral[chain_indices[i]]).norm()
     return bone_lengths
+
+
+def two_bone_ik_solve(
+    chain_positions: torch.Tensor,
+    target_position: torch.Tensor,
+    pole_position: torch.Tensor,
+    bone_lengths: torch.Tensor,
+) -> torch.Tensor:
+    """Analytic two-bone IK solver with pole vector control.
+
+    Solves for positions of 3 joints (root, mid, end) such that the end
+    effector reaches the target and the mid joint bends toward the pole.
+
+    Args:
+        chain_positions: Current joint positions, shape ``(3, 3)``.
+        target_position: Desired end-effector position, shape ``(3,)``.
+        pole_position: Pole vector target controlling bend plane, shape ``(3,)``.
+        bone_lengths: Upper and lower bone lengths, shape ``(2,)``.
+
+    Returns:
+        Solved joint positions, shape ``(3, 3)``.
+    """
+    root = chain_positions[0]
+    L1 = bone_lengths[0]
+    L2 = bone_lengths[1]
+
+    positions = chain_positions.clone()
+
+    to_target = target_position - root
+    D_raw = to_target.norm()
+    max_reach = L1 + L2
+
+    target_dir = to_target / (D_raw + 1e-12)
+
+    if D_raw >= max_reach - 1e-6:
+        # Fully extended toward target
+        positions[1] = root + target_dir * L1
+        positions[2] = root + target_dir * max_reach
+        return positions
+
+    min_reach = torch.abs(L1 - L2)
+    D = D_raw.clamp(min_reach + 1e-6, max_reach - 1e-6)
+
+    # Law of cosines: angle at root joint
+    cos_a = (L1 * L1 + D * D - L2 * L2) / (2.0 * L1 * D)
+    cos_a = cos_a.clamp(-1.0, 1.0)
+    sin_a = torch.sqrt((1.0 - cos_a * cos_a).clamp(min=0.0))
+
+    # Project pole onto plane perpendicular to target direction
+    to_pole = pole_position - root
+    pole_proj = to_pole - torch.dot(to_pole, target_dir) * target_dir
+    pole_norm = pole_proj.norm()
+
+    if pole_norm < 1e-6:
+        # Pole is colinear with root→target, pick a perpendicular fallback
+        perp = torch.tensor([1.0, 0.0, 0.0], device=root.device, dtype=root.dtype)
+        if torch.abs(torch.dot(target_dir, perp)) > 0.9:
+            perp = torch.tensor([0.0, 1.0, 0.0], device=root.device, dtype=root.dtype)
+        pole_dir = torch.cross(target_dir, perp, dim=0)
+        pole_dir = pole_dir / (pole_dir.norm() + 1e-12)
+    else:
+        pole_dir = pole_proj / pole_norm
+
+    # Mid joint: rotated from root→target axis by the solved angle
+    positions[1] = root + target_dir * (L1 * cos_a) + pole_dir * (L1 * sin_a)
+    # End effector at clamped target distance
+    positions[2] = root + target_dir * D
+
+    return positions
+
+
+def compute_default_pole_position(
+    root_pos: torch.Tensor,
+    mid_pos: torch.Tensor,
+    end_pos: torch.Tensor,
+    offset: float = 0.5,
+) -> torch.Tensor:
+    """Compute a default pole vector position from current joint positions.
+
+    Projects the mid joint's bend direction outward to create a sensible
+    default pole target.
+
+    Args:
+        root_pos: Root joint position, shape ``(3,)``.
+        mid_pos: Mid joint position, shape ``(3,)``.
+        end_pos: End joint position, shape ``(3,)``.
+        offset: Distance to push the pole from the mid joint.
+
+    Returns:
+        Default pole position, shape ``(3,)``.
+    """
+    root_to_end = end_pos - root_pos
+    root_to_end_len = root_to_end.norm()
+    if root_to_end_len < 1e-8:
+        return mid_pos.clone()
+    root_to_end_dir = root_to_end / root_to_end_len
+
+    root_to_mid = mid_pos - root_pos
+    proj_len = torch.dot(root_to_mid, root_to_end_dir)
+    proj_point = root_pos + root_to_end_dir * proj_len
+
+    bend_vec = mid_pos - proj_point
+    bend_norm = bend_vec.norm()
+
+    if bend_norm < 1e-6:
+        # Chain is nearly straight, choose a perpendicular direction
+        perp = torch.tensor([0.0, 0.0, 1.0], device=mid_pos.device, dtype=mid_pos.dtype)
+        if torch.abs(torch.dot(root_to_end_dir, perp)) > 0.9:
+            perp = torch.tensor([0.0, 1.0, 0.0], device=mid_pos.device, dtype=mid_pos.dtype)
+        bend_dir = perp - torch.dot(perp, root_to_end_dir) * root_to_end_dir
+        bend_dir = bend_dir / (bend_dir.norm() + 1e-12)
+    else:
+        bend_dir = bend_vec / bend_norm
+
+    return mid_pos + bend_dir * offset
 
 
 def fabrik_solve(
@@ -258,14 +373,14 @@ def solve_ik_chain(
     joints_local_rot: torch.Tensor,
     chain_indices: List[int],
     target_pos: torch.Tensor,
+    pole_pos: Optional[torch.Tensor] = None,
     tolerance: float = 1e-4,
     max_iterations: int = 20,
 ) -> tuple:
     """Solve IK for a single chain and return updated full-skeleton pose data.
 
-    Runs FABRIK to find solved positions, recovers rotation matrices that are
-    consistent with those positions, and re-runs FK to obtain a globally
-    consistent skeleton state.
+    Uses analytic two-bone IK with pole vector for 3-joint chains, or falls
+    back to FABRIK for longer chains.
 
     Args:
         skeleton: Skeleton instance.
@@ -274,8 +389,10 @@ def solve_ik_chain(
         joints_local_rot: Current local joint rotations, shape ``(J, 3, 3)``.
         chain_indices: Ordered joint indices from chain root to EE.
         target_pos: Desired EE world position, shape ``(3,)``.
-        tolerance: FABRIK convergence tolerance.
-        max_iterations: Maximum FABRIK iterations.
+        pole_pos: Pole vector position for two-bone IK, shape ``(3,)``.
+            Required for 3-joint chains; ignored for longer chains.
+        tolerance: FABRIK convergence tolerance (FABRIK fallback only).
+        max_iterations: Maximum FABRIK iterations (FABRIK fallback only).
 
     Returns:
         Tuple ``(new_joints_pos, new_joints_local_rot, new_joints_rot)`` with
@@ -290,11 +407,19 @@ def solve_ik_chain(
     # Use rest-pose bone lengths (stable, prevents drift from accumulating)
     bone_lengths = _get_rest_bone_lengths(skeleton, chain_indices, device, dtype)
 
-    # Solve positions with FABRIK
-    solved_positions = fabrik_solve(
-        chain_positions, target_pos.to(device=device, dtype=dtype),
-        bone_lengths, tolerance, max_iterations,
-    )
+    # Use two-bone IK for 3-joint chains when a pole vector is provided
+    if len(chain_indices) == 3 and pole_pos is not None:
+        solved_positions = two_bone_ik_solve(
+            chain_positions,
+            target_pos.to(device=device, dtype=dtype),
+            pole_pos.to(device=device, dtype=dtype),
+            bone_lengths,
+        )
+    else:
+        solved_positions = fabrik_solve(
+            chain_positions, target_pos.to(device=device, dtype=dtype),
+            bone_lengths, tolerance, max_iterations,
+        )
 
     # Recover local rotations from solved positions (drift-resistant)
     new_local_rots = _recover_rotations(

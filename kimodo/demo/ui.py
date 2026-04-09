@@ -2207,17 +2207,18 @@ def create_gui(
                     }
                     gui_undo_drag_button.disabled = False
 
-                motion.add_root_translation_gizmo(
-                    session.constraints,
-                    on_2d_root_drag_end=_on_root2d_gizmo_release,
-                    on_drag_start=_on_gizmo_drag_start,
-                )
                 if gui_ik_fk_toggle.value.startswith("IK"):
                     motion.add_ik_gizmos(
                         session.constraints,
                         on_drag_start=_on_gizmo_drag_start,
+                        on_2d_root_drag_end=_on_root2d_gizmo_release,
                     )
                 else:
+                    motion.add_root_translation_gizmo(
+                        session.constraints,
+                        on_2d_root_drag_end=_on_root2d_gizmo_release,
+                        on_drag_start=_on_gizmo_drag_start,
+                    )
                     gizmo_space = "local" if "g1" in session.model_name else gui_gizmo_space_dropdown.value.lower()
                     motion.add_joint_gizmos(
                         session.constraints,
@@ -2240,7 +2241,7 @@ def create_gui(
             if not session.edit_mode or not session.motions:
                 return
             motion = list(session.motions.values())[0]
-            # Clear existing editing gizmos (keep root translation gizmo)
+            # Clear all editing gizmos (FK joints, IK EE, pole vectors, pelvis, root translation)
             if motion.joint_gizmos is not None:
                 for joint_gizmo in motion.joint_gizmos:
                     motion.server.scene.remove_by_name(joint_gizmo.name)
@@ -2249,6 +2250,16 @@ def create_gui(
                 for gizmo in motion.ik_gizmos.values():
                     motion.server.scene.remove_by_name(gizmo.name)
                 motion.ik_gizmos = None
+            if motion.pole_gizmos is not None:
+                for gizmo in motion.pole_gizmos.values():
+                    motion.server.scene.remove_by_name(gizmo.name)
+                motion.pole_gizmos = None
+            if motion.pelvis_ik_gizmo is not None:
+                motion.server.scene.remove_by_name(motion.pelvis_ik_gizmo.name)
+                motion.pelvis_ik_gizmo = None
+            if motion.root_translation_gizmo is not None:
+                motion.server.scene.remove_by_name(motion.root_translation_gizmo.name)
+                motion.root_translation_gizmo = None
 
             def _on_gizmo_drag_start_toggle():
                 mot = list(session.motions.values())[0]
@@ -2260,15 +2271,26 @@ def create_gui(
                 }
                 gui_undo_drag_button.disabled = False
 
+            def _on_root2d_release_toggle():
+                if "2D Root" in session.constraints and session.constraints["2D Root"].dense_path:
+                    mot = list(session.motions.values())[0]
+                    _update_dense_path(mot, session)
+
             if gui_ik_fk_toggle.value.startswith("IK"):
                 gui_gizmo_space_dropdown.disabled = True
                 motion.add_ik_gizmos(
                     session.constraints,
                     on_drag_start=_on_gizmo_drag_start_toggle,
+                    on_2d_root_drag_end=_on_root2d_release_toggle,
                 )
             else:
                 if "g1" not in session.model_name:
                     gui_gizmo_space_dropdown.disabled = False
+                motion.add_root_translation_gizmo(
+                    session.constraints,
+                    on_2d_root_drag_end=_on_root2d_release_toggle,
+                    on_drag_start=_on_gizmo_drag_start_toggle,
+                )
                 gizmo_space = "local" if "g1" in session.model_name else gui_gizmo_space_dropdown.value.lower()
                 motion.add_joint_gizmos(
                     session.constraints,

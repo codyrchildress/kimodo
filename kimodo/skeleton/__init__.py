@@ -9,7 +9,7 @@ from .definitions import (
     SOMASkeleton30,
     SOMASkeleton77,
 )
-from .ik import get_chain_indices, solve_ik_chain
+from .ik import compute_default_pole_position, get_chain_indices, solve_ik_chain
 from .kinematics import batch_rigid_transform, fk
 from .registry import build_skeleton
 from .transforms import global_rots_to_local_rots, to_standard_tpose
@@ -22,6 +22,7 @@ __all__ = [
     "SMPLXSkeleton22",
     "batch_rigid_transform",
     "fk",
+    "compute_default_pole_position",
     "get_chain_indices",
     "solve_ik_chain",
     "build_skeleton",

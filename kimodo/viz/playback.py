@@ -16,7 +16,7 @@ from kimodo.skeleton import (
     batch_rigid_transform,
     global_rots_to_local_rots,
 )
-from kimodo.skeleton.ik import solve_ik_chain
+from kimodo.skeleton.ik import compute_default_pole_position, solve_ik_chain
 from kimodo.tools import to_numpy, to_torch
 
 from .g1_rig import (
@@ -72,6 +72,14 @@ class CharacterMotion:
         self._ik_gizmo_dragging: dict[str, bool] = {}
         self._ik_chains: Optional[dict] = None  # cached chain definitions
 
+        # Pole vector gizmos (one per 3-joint IK chain)
+        self.pole_gizmos: Optional[dict] = None  # chain_name -> gizmo handle
+        self._pole_gizmo_dragging: dict[str, bool] = {}
+
+        # Pelvis gizmo for IK mode (translation + rotation)
+        self.pelvis_ik_gizmo = None
+        self._pelvis_ik_gizmo_dragging = False
+
         # Lock to prevent concurrent pose edits (IK/FK gizmo callbacks can overlap)
         self._pose_edit_lock = threading.Lock()
 
@@ -115,6 +123,13 @@ class CharacterMotion:
                 if not self._ik_gizmo_dragging.get(chain_name, False):
                     ee_idx = self._ik_chains[chain_name][-1]
                     gizmo.position = self.joints_pos[self.cur_frame_idx, ee_idx].cpu().numpy()
+        # Pole gizmos are NOT auto-synced to the pose on frame change — they
+        # represent rig controls that persist where the user placed them.
+        if self.pelvis_ik_gizmo is not None and not self._pelvis_ik_gizmo_dragging and not self.updating_ik_gizmos:
+            root_pos = self.joints_pos[self.cur_frame_idx, self.skeleton.root_idx].cpu().numpy()
+            root_rot = self.joints_rot[self.cur_frame_idx, self.skeleton.root_idx].cpu().numpy()
+            self.pelvis_ik_gizmo.position = root_pos
+            self.pelvis_ik_gizmo.wxyz = tf.SO3.from_matrix(root_rot).wxyz
 
     def update_pose_at_frame(
         self,
@@ -724,21 +739,73 @@ class CharacterMotion:
 
             set_callback_in_closure(joint_idx)
 
+    def _sync_ik_constraints(self, constraints: dict):
+        """Sync Full-Body and End-Effector constraints after an IK edit."""
+        frame_idx = self.cur_frame_idx
+        if "Full-Body" in constraints:
+            full_body_constraints = constraints["Full-Body"]
+            if frame_idx in full_body_constraints.keyframes:
+                for keyframe_id in full_body_constraints.frame2keyid[frame_idx]:
+                    full_body_constraints.add_keyframe(
+                        keyframe_id,
+                        frame_idx,
+                        joints_pos=self.joints_pos[frame_idx],
+                        joints_rot=self.joints_rot[frame_idx],
+                        exists_ok=True,
+                    )
+        if "End-Effectors" in constraints:
+            end_effector_constraints = constraints["End-Effectors"]
+            if frame_idx in end_effector_constraints.keyframes:
+                current_dict = end_effector_constraints.keyframes[frame_idx]
+                for keyframe_id, _ in end_effector_constraints.frame2keyid[frame_idx]:
+                    end_effector_constraints.add_keyframe(
+                        keyframe_id,
+                        frame_idx,
+                        joints_pos=self.joints_pos[frame_idx],
+                        joints_rot=self.joints_rot[frame_idx],
+                        joint_names=current_dict["joint_names"],
+                        end_effector_type=current_dict["end_effector_type"],
+                        exists_ok=True,
+                    )
+
+    def _get_pole_pos_for_chain(self, chain_name: str) -> Optional[torch.Tensor]:
+        """Read the pole vector gizmo position for a chain, or None."""
+        if self.pole_gizmos is not None and chain_name in self.pole_gizmos:
+            return to_torch(
+                self.pole_gizmos[chain_name].position,
+                device=self.joints_pos.device,
+            ).to(dtype=self.joints_pos.dtype)
+        return None
+
     def add_ik_gizmos(
         self,
         constraints: dict,
         on_drag_start: Optional[Callable[[], None]] = None,
+        on_2d_root_drag_end: Optional[Callable[[], None]] = None,
     ):
-        """Create translational gizmos at each IK chain end-effector.
+        """Create IK rig gizmos: EE targets, pole vectors, and a pelvis control.
 
-        When the user drags an EE gizmo, the upstream chain is solved via FABRIK
-        and the full skeleton pose is updated accordingly.
+        End-effector gizmos allow dragging the hand/foot targets.  Pole vector
+        gizmos (for 3-joint chains) control the bend plane of the elbow/knee.
+        The pelvis gizmo allows translating and rotating the root while all IK
+        chains re-solve to maintain their targets.
         """
-        # Remove existing IK gizmos first
+        # ---- clean up previous IK gizmos ----
         if self.ik_gizmos is not None:
             for gizmo in self.ik_gizmos.values():
                 self.server.scene.remove_by_name(gizmo.name)
             self.ik_gizmos = None
+        if self.pole_gizmos is not None:
+            for gizmo in self.pole_gizmos.values():
+                self.server.scene.remove_by_name(gizmo.name)
+            self.pole_gizmos = None
+        if self.pelvis_ik_gizmo is not None:
+            self.server.scene.remove_by_name(self.pelvis_ik_gizmo.name)
+            self.pelvis_ik_gizmo = None
+        # Remove root translation gizmo — the pelvis gizmo replaces it in IK mode
+        if self.root_translation_gizmo is not None:
+            self.server.scene.remove_by_name(self.root_translation_gizmo.name)
+            self.root_translation_gizmo = None
 
         # Cache IK chain definitions for this skeleton
         if self._ik_chains is None:
@@ -746,7 +813,124 @@ class CharacterMotion:
 
         self.ik_gizmos = {}
         self._ik_gizmo_dragging = {}
+        self.pole_gizmos = {}
+        self._pole_gizmo_dragging = {}
 
+        # ---- pelvis gizmo (translation + rotation) ----
+        root_pos = self.joints_pos[self.cur_frame_idx, self.skeleton.root_idx].cpu().numpy()
+        root_rot = self.joints_rot[self.cur_frame_idx, self.skeleton.root_idx].cpu().numpy()
+        self.pelvis_ik_gizmo = self.server.scene.add_transform_controls(
+            f"/{self.name}/gizmo_ik_pelvis",
+            scale=0.25,
+            line_width=3.0,
+            active_axes=(True, True, True),
+            disable_axes=False,
+            disable_sliders=False,
+            disable_rotations=False,
+            depth_test=False,
+            position=root_pos,
+            wxyz=tf.SO3.from_matrix(root_rot).wxyz,
+        )
+        self._pelvis_ik_gizmo_dragging = False
+
+        @self.pelvis_ik_gizmo.on_drag_start
+        def _(_):
+            if on_drag_start is not None:
+                on_drag_start()
+            self._pelvis_ik_gizmo_dragging = True
+
+        @self.pelvis_ik_gizmo.on_update
+        def _(_):
+            if not self._pose_edit_lock.acquire(blocking=False):
+                return
+            try:
+                self.updating_ik_gizmos = True
+                frame_idx = self.cur_frame_idx
+
+                # Read new root pose from gizmo
+                new_root_pos = to_torch(
+                    self.pelvis_ik_gizmo.position,
+                    device=self.joints_pos.device,
+                ).to(dtype=self.joints_pos.dtype)
+                new_root_rot_mat = torch.tensor(
+                    tf.SO3(self.pelvis_ik_gizmo.wxyz).as_matrix(),
+                    device=self.joints_pos.device,
+                    dtype=self.joints_pos.dtype,
+                )
+
+                # Build new local rotations with updated root
+                new_local_rots = self.joints_local_rot[frame_idx].clone()
+                new_local_rots[self.skeleton.root_idx] = new_root_rot_mat
+
+                # FK to propagate root change through the skeleton
+                neutral = self.skeleton.neutral_joints.to(
+                    device=self.joints_pos.device, dtype=self.joints_pos.dtype
+                )
+                pelvis_offset = neutral[self.skeleton.root_idx]
+                new_posed, new_global_rots = batch_rigid_transform(
+                    new_local_rots[None],
+                    neutral[None],
+                    self.skeleton.joint_parents.to(self.joints_pos.device),
+                    self.skeleton.root_idx,
+                )
+                new_posed = new_posed[0] + new_root_pos[None] - pelvis_offset[None]
+                new_global_rots = new_global_rots[0]
+
+                # Re-solve every IK chain to maintain EE gizmo targets
+                for cname, cindices in self._ik_chains.items():
+                    ee_target = to_torch(
+                        self.ik_gizmos[cname].position,
+                        device=self.joints_pos.device,
+                    ).to(dtype=self.joints_pos.dtype)
+                    pole_pos = self._get_pole_pos_for_chain(cname)
+
+                    new_posed, new_local_rots, new_global_rots = solve_ik_chain(
+                        self.skeleton,
+                        new_posed,
+                        new_global_rots,
+                        new_local_rots,
+                        cindices,
+                        ee_target,
+                        pole_pos=pole_pos,
+                    )
+
+                self.update_pose_at_frame(
+                    frame_idx,
+                    joints_pos=new_posed,
+                    joints_rot=new_global_rots,
+                    joints_local_rot=new_local_rots,
+                )
+                self.set_frame(frame_idx)
+
+                # Sync constraints
+                self._sync_ik_constraints(constraints)
+                if "2D Root" in constraints:
+                    root_2d = constraints["2D Root"]
+                    if frame_idx in root_2d.keyframes:
+                        for keyframe_id in root_2d.frame2keyid[frame_idx]:
+                            root_2d.add_keyframe(
+                                keyframe_id, frame_idx,
+                                root_pos=new_root_pos, exists_ok=True, update_path=False,
+                            )
+
+                self.updating_ik_gizmos = False
+            finally:
+                self._pose_edit_lock.release()
+
+        @self.pelvis_ik_gizmo.on_drag_end
+        def _(_):
+            self._pelvis_ik_gizmo_dragging = False
+            self.updating_ik_gizmos = False
+            # Refresh 2D root path visualization
+            if "2D Root" in constraints:
+                root_2d = constraints["2D Root"]
+                if root_2d.line_segments is not None:
+                    root_2d.update_line_segments()
+            if on_2d_root_drag_end is not None:
+                on_2d_root_drag_end()
+            self.set_frame(self.cur_frame_idx)
+
+        # ---- EE gizmos + pole vector gizmos per chain ----
         for chain_name, chain_indices in self._ik_chains.items():
             ee_idx = chain_indices[-1]
             ee_pos = self.joints_pos[self.cur_frame_idx, ee_idx].cpu().numpy()
@@ -765,6 +949,79 @@ class CharacterMotion:
             self.ik_gizmos[chain_name] = gizmo
             self._ik_gizmo_dragging[chain_name] = False
 
+            # Pole vector gizmo for 3-joint chains
+            if len(chain_indices) == 3:
+                root_idx_c = chain_indices[0]
+                mid_idx = chain_indices[1]
+                root_pos_c = self.joints_pos[self.cur_frame_idx, root_idx_c]
+                mid_pos_c = self.joints_pos[self.cur_frame_idx, mid_idx]
+                end_pos_c = self.joints_pos[self.cur_frame_idx, ee_idx]
+                default_pole = compute_default_pole_position(root_pos_c, mid_pos_c, end_pos_c)
+
+                pole_gizmo = self.server.scene.add_transform_controls(
+                    f"/{self.name}/gizmo_pole_{chain_name}",
+                    scale=0.08,
+                    line_width=2.0,
+                    active_axes=(True, True, True),
+                    disable_axes=False,
+                    disable_sliders=True,
+                    disable_rotations=True,
+                    depth_test=False,
+                    position=default_pole.cpu().numpy(),
+                )
+                self.pole_gizmos[chain_name] = pole_gizmo
+                self._pole_gizmo_dragging[chain_name] = False
+
+                def _set_pole_callback(pname: str, pcindices: list) -> None:
+                    @pole_gizmo.on_drag_start
+                    def _(_):
+                        if on_drag_start is not None:
+                            on_drag_start()
+                        self._pole_gizmo_dragging[pname] = True
+
+                    @pole_gizmo.on_update
+                    def _(_):
+                        if not self._pose_edit_lock.acquire(blocking=False):
+                            return
+                        try:
+                            self.updating_ik_gizmos = True
+                            target_pos = to_torch(
+                                self.ik_gizmos[pname].position,
+                                device=self.joints_pos.device,
+                            ).to(dtype=self.joints_pos.dtype)
+                            pole_pos = to_torch(
+                                self.pole_gizmos[pname].position,
+                                device=self.joints_pos.device,
+                            ).to(dtype=self.joints_pos.dtype)
+
+                            new_jp, new_lr, new_gr = solve_ik_chain(
+                                self.skeleton,
+                                self.joints_pos[self.cur_frame_idx],
+                                self.joints_rot[self.cur_frame_idx],
+                                self.joints_local_rot[self.cur_frame_idx],
+                                pcindices,
+                                target_pos,
+                                pole_pos=pole_pos,
+                            )
+                            self.update_pose_at_frame(
+                                self.cur_frame_idx,
+                                joints_pos=new_jp, joints_rot=new_gr, joints_local_rot=new_lr,
+                            )
+                            self.set_frame(self.cur_frame_idx)
+                            self._sync_ik_constraints(constraints)
+                            self.updating_ik_gizmos = False
+                        finally:
+                            self._pose_edit_lock.release()
+
+                    @pole_gizmo.on_drag_end
+                    def _(_):
+                        self._pole_gizmo_dragging[pname] = False
+                        self.updating_ik_gizmos = False
+                        self.set_frame(self.cur_frame_idx)
+
+                _set_pole_callback(chain_name, chain_indices)
+
+            # EE gizmo callbacks
             def _set_ik_callback(cname: str, cindices: list) -> None:
                 @gizmo.on_drag_start
                 def _(_):
@@ -782,6 +1039,7 @@ class CharacterMotion:
                             self.ik_gizmos[cname].position,
                             device=self.joints_pos.device,
                         ).to(dtype=self.joints_pos.dtype)
+                        pole_pos = self._get_pole_pos_for_chain(cname)
 
                         new_joints_pos, new_local_rots, new_global_rots = solve_ik_chain(
                             self.skeleton,
@@ -790,6 +1048,7 @@ class CharacterMotion:
                             self.joints_local_rot[self.cur_frame_idx],
                             cindices,
                             target_pos,
+                            pole_pos=pole_pos,
                         )
 
                         self.update_pose_at_frame(
@@ -800,34 +1059,7 @@ class CharacterMotion:
                         )
 
                         self.set_frame(self.cur_frame_idx)
-
-                        # Update constraints (same pattern as FK gizmos)
-                        frame_idx = self.cur_frame_idx
-                        if "Full-Body" in constraints:
-                            full_body_constraints = constraints["Full-Body"]
-                            if frame_idx in full_body_constraints.keyframes:
-                                for keyframe_id in full_body_constraints.frame2keyid[frame_idx]:
-                                    full_body_constraints.add_keyframe(
-                                        keyframe_id,
-                                        frame_idx,
-                                        joints_pos=self.joints_pos[frame_idx],
-                                        joints_rot=self.joints_rot[frame_idx],
-                                        exists_ok=True,
-                                    )
-                        if "End-Effectors" in constraints:
-                            end_effector_constraints = constraints["End-Effectors"]
-                            if frame_idx in end_effector_constraints.keyframes:
-                                current_dict = end_effector_constraints.keyframes[frame_idx]
-                                for keyframe_id, _ in end_effector_constraints.frame2keyid[frame_idx]:
-                                    end_effector_constraints.add_keyframe(
-                                        keyframe_id,
-                                        frame_idx,
-                                        joints_pos=self.joints_pos[frame_idx],
-                                        joints_rot=self.joints_rot[frame_idx],
-                                        joint_names=current_dict["joint_names"],
-                                        end_effector_type=current_dict["end_effector_type"],
-                                        exists_ok=True,
-                                    )
+                        self._sync_ik_constraints(constraints)
 
                         self.updating_ik_gizmos = False
                     finally:
@@ -859,9 +1091,18 @@ class CharacterMotion:
             for gizmo in self.ik_gizmos.values():
                 self.server.scene.remove_by_name(gizmo.name)
             self.ik_gizmos = None
+        if self.pole_gizmos is not None:
+            for gizmo in self.pole_gizmos.values():
+                self.server.scene.remove_by_name(gizmo.name)
+            self.pole_gizmos = None
+        if self.pelvis_ik_gizmo is not None:
+            self.server.scene.remove_by_name(self.pelvis_ik_gizmo.name)
+            self.pelvis_ik_gizmo = None
         self._drag_start_world_rot = []
         self._joint_gizmo_dragging = []
         self._ik_gizmo_dragging = {}
+        self._pole_gizmo_dragging = {}
+        self._pelvis_ik_gizmo_dragging = False
         self.updating_root_translation_gizmo = False
         self.updating_joint_gizmos = False
         self.updating_ik_gizmos = False
