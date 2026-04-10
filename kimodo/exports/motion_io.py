@@ -380,14 +380,14 @@ def load_motion_file(
 ) -> tuple[Dict[str, torch.Tensor], int]:
     """Load a motion file and return a Kimodo motion dict plus joint count.
 
-    Supports SOMA BVH (``.bvh``), G1 MuJoCo CSV (``.csv``), Kimodo NPZ, and AMASS SMPL-X NPZ
-    (``.npz``).
+    Supports SOMA BVH (``.bvh``), FBX (``.fbx``), G1 MuJoCo CSV (``.csv``),
+    Kimodo NPZ, and AMASS SMPL-X NPZ (``.npz``).
 
     The motion is loaded at its native (or overridden) source rate, then
     resampled to ``target_fps`` when they differ.
 
     Args:
-        path: Path to ``.bvh``, ``.csv``, or ``.npz``.
+        path: Path to ``.bvh``, ``.fbx``, ``.csv``, or ``.npz``.
         source_fps: Source frame rate (Hz).  If provided, trusted as-is.
             If ``None``, auto-detected per format: BVH ``Frame Time`` header,
             AMASS ``mocap_frame_rate``, or :data:`KIMODO_CONVERT_TARGET_FPS`
@@ -413,6 +413,12 @@ def load_motion_file(
         motion_dict, bvh_fps = bvh_to_kimodo_motion(path)
         effective_source = source_fps if source_fps is not None else bvh_fps
         num_joints = int(motion_dict["local_rot_mats"].shape[1])
+    elif ext == ".fbx":
+        from kimodo.exports.fbx import fbx_to_kimodo_motion
+
+        motion_dict, fbx_fps = fbx_to_kimodo_motion(path)
+        effective_source = source_fps if source_fps is not None else fbx_fps
+        num_joints = int(motion_dict["local_rot_mats"].shape[1])
     elif ext == ".csv":
         effective_source = source_fps if source_fps is not None else KIMODO_CONVERT_TARGET_FPS
         motion_dict = load_g1_csv(path, source_fps=effective_source, mujoco_rest_zero=mujoco_rest_zero)
@@ -427,7 +433,7 @@ def load_motion_file(
             effective_source = source_fps if source_fps is not None else KIMODO_CONVERT_TARGET_FPS
             motion_dict, num_joints = load_kimodo_npz_as_torch(path, source_fps=effective_source)
     else:
-        raise ValueError(f"Unsupported motion file {path!r}; expected .bvh, .csv, or .npz")
+        raise ValueError(f"Unsupported motion file {path!r}; expected .bvh, .fbx, .csv, or .npz")
 
     if abs(effective_source - target_fps) > 0.5:
         sk = build_skeleton(num_joints)

@@ -711,11 +711,15 @@ def create_gui(
                 gui_load_motion_path_text = client.gui.add_text(
                     "Load Path",
                     initial_value="output.npz",
-                    hint="SOMA .bvh, AnimBuddy or AMASS .npz, or G1 MuJoCo .csv",
+                    hint="SOMA .bvh, .fbx, AnimBuddy or AMASS .npz, or G1 MuJoCo .csv",
                 )
                 gui_load_motion_button = client.gui.add_button(
                     "Load Motion",
                     hint="Load the selected motion",
+                )
+                gui_import_to_timeline_button = client.gui.add_button(
+                    "Import to Timeline",
+                    hint="Load a motion file and add full-body keyframes on every frame of the timeline",
                 )
             with client.gui.add_folder("Constraints", expand_by_default=False):
                 gui_save_constraints_path_text = client.gui.add_text(
@@ -998,6 +1002,103 @@ def create_gui(
 
                     traceback.print_exc()
                     loading_notif.title = "Failed to load motion!"
+                    loading_notif.body = str(e)
+                    loading_notif.loading = False
+                    loading_notif.with_close_button = True
+                    loading_notif.auto_close_seconds = 10.0
+                    loading_notif.color = "red"
+
+            @gui_import_to_timeline_button.on_click
+            def _(event: viser.GuiEvent) -> None:
+                event_client = event.client
+                session = get_active_session(event_client)
+                if session is None:
+                    return
+
+                load_path = gui_load_motion_path_text.value
+                loading_notif = event_client.add_notification(
+                    title="Importing to timeline...",
+                    body=f"Loading from {load_path}",
+                    loading=True,
+                    with_close_button=False,
+                    auto_close_seconds=None,
+                )
+                try:
+                    # Step 1: Load the motion (same as Load Motion)
+                    load_motion(event_client, load_path)
+
+                    session = demo.client_sessions[event_client.client_id]
+                    motion = list(session.motions.values())[0]
+
+                    # Step 2: Clear existing Full-Body constraints
+                    fullbody_track_id = session.timeline_data["tracks_ids"]["Full-Body"]
+                    constraint_track = session.constraints["Full-Body"]
+
+                    with session.timeline_data["keyframe_update_lock"]:
+                        # Remove existing full-body keyframes from timeline
+                        kf_to_remove = [
+                            kf_id
+                            for kf_id, kf_data in session.timeline_data["keyframes"].items()
+                            if kf_data["track_id"] == fullbody_track_id
+                        ]
+                        for kf_id in kf_to_remove:
+                            event_client.timeline.remove_keyframe(kf_id)
+                            del session.timeline_data["keyframes"][kf_id]
+
+                        # Remove existing full-body intervals from timeline
+                        iv_to_remove = [
+                            iv_id
+                            for iv_id, iv_data in session.timeline_data["intervals"].items()
+                            if iv_data["track_id"] == fullbody_track_id
+                        ]
+                        for iv_id in iv_to_remove:
+                            event_client.timeline.remove_interval(iv_id)
+                            del session.timeline_data["intervals"][iv_id]
+
+                        constraint_track.clear()
+
+                        # Step 3: Add an individual full-body keyframe on every frame
+                        for frame in range(session.max_frame_idx + 1):
+                            frame_joints_pos = motion.get_joints_pos(frame)
+                            frame_joints_rot = motion.get_joints_rot(frame)
+
+                            keyframe_id = event_client.timeline.add_keyframe(
+                                fullbody_track_id, frame
+                            )
+                            session.timeline_data["keyframes"][keyframe_id] = {
+                                "track_id": fullbody_track_id,
+                                "frame": frame,
+                                "locked": False,
+                                "opacity": 1.0,
+                                "value": None,
+                            }
+                            # viz_skeleton=False to avoid creating a mesh overlay per frame
+                            constraint_track.add_keyframe(
+                                keyframe_id,
+                                frame,
+                                to_torch(frame_joints_pos),
+                                to_torch(frame_joints_rot),
+                                viz_label=False,
+                                viz_skeleton=False,
+                            )
+
+                    apply_constraint_overlay_visibility(session)
+
+                    num_frames = session.max_frame_idx + 1
+                    loading_notif.title = "Imported to timeline!"
+                    loading_notif.body = (
+                        f"Added {num_frames} full-body keyframes "
+                        f"({session.cur_duration:.2f}s) from {load_path}"
+                    )
+                    loading_notif.loading = False
+                    loading_notif.with_close_button = True
+                    loading_notif.auto_close_seconds = 5.0
+                    loading_notif.color = "green"
+                except Exception as e:
+                    import traceback
+
+                    traceback.print_exc()
+                    loading_notif.title = "Failed to import!"
                     loading_notif.body = str(e)
                     loading_notif.loading = False
                     loading_notif.with_close_button = True

@@ -248,6 +248,7 @@ class FullbodyKeyframeSet(ConstraintSet):
         joints_pos: torch.Tensor | np.ndarray,
         joints_rot: torch.Tensor | np.ndarray,
         viz_label: bool = True,
+        viz_skeleton: bool = True,
         exists_ok: bool = False,
     ):
         """Adds a single full-body keyframe at the given frame or updates the existing one at this
@@ -258,39 +259,42 @@ class FullbodyKeyframeSet(ConstraintSet):
             keyframe_id: str, id for the keyframe. Must be unique within the given frame_idx.
             frame_idx: int, frame index to add the keyframe at
             joints_pos: torch.Tensor, [J, 3] joints positions to add the keyframe at
+            viz_skeleton: bool, if False skip creating 3D skeleton mesh overlays (for bulk import)
         """
         # create/update scene elements
         if frame_idx in self.keyframes:
-            skeleton_mesh = self.scene_elements[frame_idx]["skeleton_mesh"]
-            skeleton_mesh.set_pose(to_torch(joints_pos))
-            if viz_label and "label" in self.scene_elements[frame_idx]:
+            if viz_skeleton and frame_idx in self.scene_elements and "skeleton_mesh" in self.scene_elements[frame_idx]:
+                skeleton_mesh = self.scene_elements[frame_idx]["skeleton_mesh"]
+                skeleton_mesh.set_pose(to_torch(joints_pos))
+            if viz_label and frame_idx in self.scene_elements and "label" in self.scene_elements[frame_idx]:
                 label = self.scene_elements[frame_idx]["label"]
                 label.position = to_numpy(joints_pos)[self.skeleton.root_idx]
                 label.visible = self.labels_visible
         else:
-            # create skeleton to visualize the full-body constraint
-            skeleton_mesh = SkeletonMesh(
-                f"/{self.name}/skeleton_{frame_idx}",
-                self.server,
-                self.skeleton,
-                joint_color=(255, 235, 0),
-                bone_color=(255, 0, 0),
-                starting_joints_pos=to_torch(joints_pos),
-            )
-            self.scene_elements[frame_idx] = {
-                "skeleton_mesh": skeleton_mesh,
-            }
-            if viz_label:
-                label = self.server.scene.add_label(
-                    name=f"/{self.name}/label_{frame_idx}",
-                    text=f"{self.display_name} @ {frame_idx}",
-                    position=to_numpy(joints_pos)[self.skeleton.root_idx],
-                    font_size_mode="screen",
-                    font_screen_scale=0.7,
-                    anchor="center-center",
+            if viz_skeleton:
+                # create skeleton to visualize the full-body constraint
+                skeleton_mesh = SkeletonMesh(
+                    f"/{self.name}/skeleton_{frame_idx}",
+                    self.server,
+                    self.skeleton,
+                    joint_color=(255, 235, 0),
+                    bone_color=(255, 0, 0),
+                    starting_joints_pos=to_torch(joints_pos),
                 )
-                label.visible = self.labels_visible
-                self.scene_elements[frame_idx]["label"] = label
+                self.scene_elements[frame_idx] = {
+                    "skeleton_mesh": skeleton_mesh,
+                }
+                if viz_label:
+                    label = self.server.scene.add_label(
+                        name=f"/{self.name}/label_{frame_idx}",
+                        text=f"{self.display_name} @ {frame_idx}",
+                        position=to_numpy(joints_pos)[self.skeleton.root_idx],
+                        font_size_mode="screen",
+                        font_screen_scale=0.7,
+                        anchor="center-center",
+                    )
+                    label.visible = self.labels_visible
+                    self.scene_elements[frame_idx]["label"] = label
 
         # set/update data
         self.keyframes[frame_idx] = {
@@ -314,6 +318,7 @@ class FullbodyKeyframeSet(ConstraintSet):
         end_frame_idx: int,
         joints_pos: torch.Tensor,
         joints_rot: torch.Tensor,
+        viz_skeleton: bool = True,
     ):
         """Adds a full-body keyframe interval between the given start and end frames.
 
@@ -321,6 +326,7 @@ class FullbodyKeyframeSet(ConstraintSet):
             start_frame_idx: int, start frame index of the interval
             end_frame_idx: int, end frame index of the interval
             joints_pos: torch.Tensor, [T, J, 3] joints positions within the interval
+            viz_skeleton: bool, if False skip creating 3D skeleton mesh overlays (for bulk import)
         """
         assert joints_pos.shape[0] == end_frame_idx - start_frame_idx + 1
         for frame_idx in range(start_frame_idx, end_frame_idx + 1):
@@ -331,6 +337,7 @@ class FullbodyKeyframeSet(ConstraintSet):
                 joints_pos[rel_idx],
                 joints_rot[rel_idx],
                 viz_label=False,
+                viz_skeleton=viz_skeleton,
             )
 
         # add separate interval label
@@ -379,14 +386,16 @@ class FullbodyKeyframeSet(ConstraintSet):
     def clear(self, frame_idx: Optional[int] = None):
         frame_idx_list = list(self.keyframes.keys()) if frame_idx is None else [frame_idx]
         for fidx in frame_idx_list:
-            self.scene_elements[fidx]["skeleton_mesh"].clear()
-            if "ee_rotation_axes" in self.scene_elements[fidx]:
-                self.server.scene.remove_by_name(self.scene_elements[fidx]["ee_rotation_axes"].name)
-            if "label" in self.scene_elements[fidx]:
-                self.server.scene.remove_by_name(self.scene_elements[fidx]["label"].name)
+            if fidx in self.scene_elements:
+                if "skeleton_mesh" in self.scene_elements[fidx]:
+                    self.scene_elements[fidx]["skeleton_mesh"].clear()
+                if "ee_rotation_axes" in self.scene_elements[fidx]:
+                    self.server.scene.remove_by_name(self.scene_elements[fidx]["ee_rotation_axes"].name)
+                if "label" in self.scene_elements[fidx]:
+                    self.server.scene.remove_by_name(self.scene_elements[fidx]["label"].name)
+                self.scene_elements.pop(fidx)
 
             self.keyframes.pop(fidx)
-            self.scene_elements.pop(fidx)
             self.frame2keyid.pop(fidx, None)
 
         if frame_idx is None:
@@ -400,7 +409,8 @@ class FullbodyKeyframeSet(ConstraintSet):
         show_all = only_frame is None
         for fidx, scene_data in self.scene_elements.items():
             visible = show_all or fidx == only_frame
-            scene_data["skeleton_mesh"].set_visibility(visible)
+            if "skeleton_mesh" in scene_data:
+                scene_data["skeleton_mesh"].set_visibility(visible)
             label = scene_data.get("label")
             if label is not None:
                 label.visible = visible and self.labels_visible
